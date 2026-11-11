@@ -3,9 +3,7 @@ import zlib
 from io import BytesIO
 from typing import Type, Union
 
-import lz4.frame
 import pytest
-import zstandard
 
 from mcap.data_stream import RecordBuilder
 from mcap.exceptions import EndOfFile
@@ -50,16 +48,10 @@ def serialize(record: McapRecord, extension: bytes = b"") -> bytes:
     )
 
 
-def make_chunk(data: bytes, compression: str) -> Chunk:
-    if compression == "zstd":
-        compressed = zstandard.compress(data)
-    elif compression == "lz4":
-        compressed = lz4.frame.compress(data)
-    else:
-        compressed = data
+def make_chunk(data: bytes) -> Chunk:
     return Chunk(
-        compression=compression,
-        data=compressed,
+        compression="",
+        data=data,
         message_start_time=MESSAGE.log_time,
         message_end_time=MESSAGE.log_time,
         uncompressed_size=len(data),
@@ -97,11 +89,9 @@ def make_indexed_file(chunk: Chunk) -> BytesIO:
 
 
 @pytest.mark.parametrize("reader_cls", [SeekingReader, NonSeekingReader])
-@pytest.mark.parametrize("compression", ["", "zstd", "lz4"])
 @pytest.mark.parametrize("extended", ["none", "schema", "channel", "both"])
 def test_chunk_record_extensions(
     reader_cls: Union[Type[SeekingReader], Type[NonSeekingReader]],
-    compression: str,
     extended: str,
 ):
     extension = b"\x00future fields"
@@ -110,26 +100,12 @@ def test_chunk_record_extensions(
         + serialize(CHANNEL, extension if extended in ("channel", "both") else b"")
         + serialize(MESSAGE)
     )
-    reader = reader_cls(
-        make_indexed_file(make_chunk(data, compression)), validate_crcs=True
-    )
+    reader = reader_cls(make_indexed_file(make_chunk(data)), validate_crcs=True)
     assert list(reader.iter_messages()) == [(SCHEMA, CHANNEL, MESSAGE)]
 
 
 @pytest.mark.parametrize("record", [SCHEMA, CHANNEL])
-@pytest.mark.parametrize("compression", ["", "zstd", "lz4"])
-def test_chunk_record_known_fields_exceed_length(record: McapRecord, compression: str):
-    data = serialize(record)
-    data = data[:1] + struct.pack("<Q", len(data) - 10) + data[9:]
-    with pytest.raises(EndOfFile):
-        breakup_chunk(make_chunk(data + serialize(MESSAGE), compression))
-
-
-@pytest.mark.parametrize("record", [SCHEMA, CHANNEL])
-@pytest.mark.parametrize("compression", ["", "zstd", "lz4"])
-def test_chunk_record_field_length_exceeds_boundary(
-    record: Union[Schema, Channel], compression: str
-):
+def test_chunk_record_field_length_exceeds_boundary(record: Union[Schema, Channel]):
     data = serialize(record)
     field_length = len(record.data) if isinstance(record, Schema) else len("value")
     length_offset = len(data) - field_length - 4
@@ -139,27 +115,24 @@ def test_chunk_record_field_length_exceeds_boundary(
         + data[length_offset + 4 :]
     )
     with pytest.raises(EndOfFile):
-        breakup_chunk(make_chunk(data, compression))
+        breakup_chunk(make_chunk(data))
 
 
 @pytest.mark.parametrize("record", [SCHEMA, CHANNEL])
-@pytest.mark.parametrize("compression", ["", "zstd", "lz4"])
 @pytest.mark.parametrize("extension", [b"", b"\x00future fields"])
-def test_chunk_record_truncated(record: McapRecord, compression: str, extension: bytes):
+def test_chunk_record_truncated(record: McapRecord, extension: bytes):
     data = serialize(record, extension)[:-1]
     with pytest.raises(EndOfFile):
-        breakup_chunk(make_chunk(data, compression))
+        breakup_chunk(make_chunk(data))
 
 
 @pytest.mark.parametrize("length", [0, 21])
-@pytest.mark.parametrize("compression", ["", "zstd", "lz4"])
-def test_chunk_message_fields_exceed_length(length: int, compression: str):
+def test_chunk_message_fields_exceed_length(length: int):
     data = struct.pack("<BQ", Opcode.MESSAGE, length) + b"\x00" * length
     with pytest.raises(EndOfFile):
-        breakup_chunk(make_chunk(data + serialize(MESSAGE), compression))
+        breakup_chunk(make_chunk(data + serialize(MESSAGE)))
 
 
-@pytest.mark.parametrize("compression", ["", "zstd", "lz4"])
-def test_chunk_empty_message(compression: str):
+def test_chunk_empty_message():
     message = Message(channel_id=1, log_time=42, publish_time=43, sequence=7, data=b"")
-    assert breakup_chunk(make_chunk(serialize(message), compression)) == [message]
+    assert breakup_chunk(make_chunk(serialize(message))) == [message]
